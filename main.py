@@ -95,17 +95,24 @@ async def candles(symbol: str = "EURUSD_otc"):
             "candles": result
         }
 
-    except HTTPException:
+        except HTTPException:
         raise
 
     except Exception as e:
-    import traceback
+        import traceback
 
-    print("===== QUOTEX ERROR =====")
-    print(traceback.format_exc())
-    print("========================")
+        print("===== QUOTEX ERROR =====")
+        print(traceback.format_exc())
+        print("========================")
 
-    raise HTTPException(
-        status_code=500,
-        detail=f"Quotex API error: {type(e).__name__}: {str(e)}"
-    )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Quotex API error: {type(e).__name__}: {str(e)}"
+        )
+
+    finally:
+        if client:
+            try:
+                await client.close()
+            except Exception:
+                pass
