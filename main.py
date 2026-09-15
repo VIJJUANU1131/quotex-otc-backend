@@ -1,8 +1,15 @@
 import os
 import time
 
+import curl_cffi.requests
+
+if not hasattr(curl_cffi.requests.Response, "reason_phrase"):
+    curl_cffi.requests.Response.reason_phrase = property(
+        lambda self: getattr(self, "reason", "")
+    )
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+import curl_cffi.requests
 from pyquotex.stable_api import Quotex
 
 app = FastAPI()
