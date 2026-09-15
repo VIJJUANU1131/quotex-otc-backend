@@ -2,25 +2,67 @@ import os
 import time
 import traceback
 
-import curl_cffi.requests
-
-# Compatibility fix for pyquotex
-Response = curl_cffi.requests.Response
-
-if not hasattr(Response, "reason_phrase"):
-    Response.reason_phrase = property(
-        lambda self: getattr(self, "reason", "")
-    )
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+
+from pyquotex.network.login import Login
 from pyquotex.stable_api import Quotex
 
 
+# ==================================================
+# FIX pyquotex reason_phrase ERROR
+# ==================================================
+
+_original_login_call = Login.__call__
+
+
+async def fixed_login_call(self, username, password, user_data_dir=None):
+    try:
+        home = await self.get_sign_page()
+
+        if not home.is_success:
+            reason = getattr(
+                home,
+                "reason",
+                f"HTTP {getattr(home, 'status_code', 'unknown')}"
+            )
+
+            print("===== QUOTEX LOGIN PAGE ERROR =====")
+            print("Status:", getattr(home, "status_code", "unknown"))
+            print("Reason:", reason)
+            print("URL:", getattr(home, "url", "unknown"))
+            print("===================================")
+
+            return False, f"Access page failed: {reason}"
+
+        data = {
+            "_token": await self.get_token(),
+            "email": username,
+            "password": password,
+            "remember": 1,
+        }
+
+        status, msg = await self._post(data)
+
+        return status, msg
+
+    except Exception as e:
+        print("===== LOGIN ERROR =====")
+        print(traceback.format_exc())
+        print("=======================")
+
+        return False, f"{type(e).__name__}: {str(e)}"
+
+
+Login.__call__ = fixed_login_call
+
+
+# ==================================================
+# FASTAPI
+# ==================================================
+
 app = FastAPI()
 
-
-# CORS - allows your Netlify website to call this backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,14 +72,13 @@ app.add_middleware(
 )
 
 
-# Credentials are taken from Render Environment Variables
 EMAIL = os.getenv("QUOTEX_EMAIL")
 PASSWORD = os.getenv("QUOTEX_PASSWORD")
 
 
-# --------------------------------------------------
-# HOME / STATUS
-# --------------------------------------------------
+# ==================================================
+# HOME
+# ==================================================
 
 @app.get("/")
 def home():
@@ -49,9 +90,9 @@ def home():
     }
 
 
-# --------------------------------------------------
-# QUOTEX OTC M1 CANDLES
-# --------------------------------------------------
+# ==================================================
+# OTC M1 CANDLES
+# ==================================================
 
 @app.get("/api/v1/candles")
 async def candles(symbol: str = "EURUSD_otc"):
@@ -59,37 +100,41 @@ async def candles(symbol: str = "EURUSD_otc"):
     if not EMAIL:
         raise HTTPException(
             status_code=500,
-            detail="QUOTEX_EMAIL is missing in Render Environment Variables"
+            detail="QUOTEX_EMAIL is missing"
         )
 
     if not PASSWORD:
         raise HTTPException(
             status_code=500,
-            detail="QUOTEX_PASSWORD is missing in Render Environment Variables"
+            detail="QUOTEX_PASSWORD is missing"
         )
 
     client = None
 
     try:
 
-        print("====================================")
-        print("Starting Quotex connection...")
+        print("===================================")
+        print("Connecting to Quotex...")
         print("Symbol:", symbol)
         print("Timeframe: M1")
-        print("====================================")
+        print("===================================")
 
-        # Create Quotex client
         client = Quotex(
             email=EMAIL,
             password=PASSWORD,
-            lang="en"
+            host="qxbroker.com",
+            lang="en",
+            asset_default=symbol,
+            period_default=60
         )
 
-        # Connect to Quotex
+        # Demo account
+        client.set_account_mode("PRACTICE")
+
         connected, reason = await client.connect()
 
-        print("Connection result:", connected)
-        print("Connection message:", reason)
+        print("Connected:", connected)
+        print("Message:", reason)
 
         if not connected:
             raise HTTPException(
@@ -97,12 +142,11 @@ async def candles(symbol: str = "EURUSD_otc"):
                 detail=f"Quotex connection failed: {reason}"
             )
 
-        print("Quotex connection successful")
-
-        # Current time
+        # Current timestamp
         end_time = time.time()
 
-        # Get recent 1-minute candles
+        print("Requesting M1 candles...")
+
         data = await client.get_candles(
             asset=symbol,
             end_from_time=end_time,
@@ -116,13 +160,11 @@ async def candles(symbol: str = "EURUSD_otc"):
                 detail=f"No candles returned for {symbol}"
             )
 
-        print("Candles received:", len(data))
-
-        candles_result = []
+        result = []
 
         for candle in data:
 
-            candles_result.append({
+            result.append({
                 "time": candle.get("time"),
                 "open": candle.get("open"),
                 "high": candle.get("high"),
@@ -131,13 +173,15 @@ async def candles(symbol: str = "EURUSD_otc"):
                 "ticks": candle.get("ticks", 0)
             })
 
+        print("Candles received:", len(result))
+
         return {
             "status": "success",
             "market": "QUOTEX_OTC",
             "symbol": symbol,
             "timeframe": "M1",
-            "count": len(candles_result),
-            "candles": candles_result
+            "count": len(result),
+            "candles": result
         }
 
     except HTTPException:
@@ -146,15 +190,14 @@ async def candles(symbol: str = "EURUSD_otc"):
     except Exception as e:
 
         print("")
-        print("====================================")
-        print("        QUOTEX API ERROR")
-        print("====================================")
-        print("Error type:", type(e).__name__)
+        print("===================================")
+        print("       QUOTEX API ERROR")
+        print("===================================")
+        print("Type:", type(e).__name__)
         print("Error:", str(e))
         print("")
-        print("FULL TRACEBACK:")
         print(traceback.format_exc())
-        print("====================================")
+        print("===================================")
 
         raise HTTPException(
             status_code=500,
@@ -169,8 +212,5 @@ async def candles(symbol: str = "EURUSD_otc"):
                 await client.close()
                 print("Quotex connection closed")
 
-            except Exception as close_error:
-                print(
-                    "Close connection error:",
-                    str(close_error)
-                )
+            except Exception as e:
+                print("Close error:", str(e))
