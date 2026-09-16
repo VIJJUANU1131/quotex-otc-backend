@@ -1,7 +1,7 @@
 import os
 import asyncio
-import time
 import logging
+import traceback
 from typing import List
 
 from fastapi import FastAPI, Query
@@ -18,15 +18,15 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-logger = logging.getLogger("quotex-backend")
+logger = logging.getLogger("quotex")
 
 
 # =========================================================
-# FASTAPI
+# APP
 # =========================================================
 
 app = FastAPI(
-    title="Quotex Real Market Data API",
+    title="Quotex Real Market API",
     version="1.0.0"
 )
 
@@ -40,7 +40,7 @@ app.add_middleware(
 
 
 # =========================================================
-# ENVIRONMENT VARIABLES
+# ENVIRONMENT
 # =========================================================
 
 QUOTEX_EMAIL = os.getenv("QUOTEX_EMAIL")
@@ -83,7 +83,40 @@ client_lock = asyncio.Lock()
 
 
 # =========================================================
-# QUOTEX CLIENT
+# CREATE QUOTEX CLIENT
+# =========================================================
+
+def create_client():
+
+    if not QUOTEX_EMAIL:
+        raise RuntimeError(
+            "QUOTEX_EMAIL is missing"
+        )
+
+    if not QUOTEX_PASSWORD:
+        raise RuntimeError(
+            "QUOTEX_PASSWORD is missing"
+        )
+
+    logger.info("Creating Quotex client")
+
+    q = Quotex(
+        email=QUOTEX_EMAIL,
+        password=QUOTEX_PASSWORD,
+        host="qxbroker.com",
+        lang="en",
+        asset_default="EURUSD",
+        period_default=60,
+    )
+
+    # Official PyQuotex debug option
+    q.debug_ws_enable = True
+
+    return q
+
+
+# =========================================================
+# CONNECT
 # =========================================================
 
 async def get_client():
@@ -92,7 +125,7 @@ async def get_client():
 
     async with client_lock:
 
-        # Already connected?
+        # Existing client
         if client is not None:
 
             try:
@@ -105,216 +138,49 @@ async def get_client():
             except Exception as e:
 
                 logger.warning(
-                    "Existing connection check failed: %s",
+                    "Existing client check failed: %s",
                     str(e)
                 )
 
-        # Credentials check
-        if not QUOTEX_EMAIL:
-            raise RuntimeError(
-                "QUOTEX_EMAIL is not configured in Render Environment Variables"
-            )
+        # New client
+        client = create_client()
 
-        if not QUOTEX_PASSWORD:
-            raise RuntimeError(
-                "QUOTEX_PASSWORD is not configured in Render Environment Variables"
-            )
-
-        logger.info("Creating Quotex client...")
-
-        # Create client
-        client = Quotex(
-            email=QUOTEX_EMAIL,
-            password=QUOTEX_PASSWORD,
-            host="qxbroker.com",
-            lang="en",
-            asset_default="EURUSD",
-            period_default=60,
+        logger.info(
+            "Starting Quotex authentication..."
         )
-
-        # Enable PyQuotex websocket debug logging
-        client.debug_ws_enable = True
-
-        logger.info("Connecting to Quotex...")
 
         try:
 
             connected, reason = await client.connect()
 
+            logger.info(
+                "Connect result: connected=%s reason=%s",
+                connected,
+                reason
+            )
+
+            if not connected:
+
+                raise RuntimeError(
+                    f"Quotex connection failed: {reason}"
+                )
+
+            return client
+
         except Exception as e:
 
-            client = None
-
-            logger.exception(
-                "Quotex connection exception"
+            logger.error(
+                "QUOTEX CONNECTION ERROR: %s",
+                str(e)
             )
 
-            raise RuntimeError(
-                f"Quotex connection exception: {str(e)}"
+            logger.error(
+                traceback.format_exc()
             )
-
-        if not connected:
 
             client = None
 
-            raise RuntimeError(
-                f"Quotex connection failed: {reason}"
-            )
-
-        logger.info(
-            "Quotex connection successful: %s",
-            reason
-        )
-
-        return client
-
-
-# =========================================================
-# NORMALIZE CANDLES
-# =========================================================
-
-def normalize_candles(raw_candles) -> List[dict]:
-
-    result = []
-
-    if not raw_candles:
-        return result
-
-    # Dictionary format
-    if isinstance(raw_candles, dict):
-
-        items = raw_candles.items()
-
-    # List format
-    elif isinstance(raw_candles, list):
-
-        items = enumerate(raw_candles)
-
-    else:
-
-        return result
-
-    for timestamp, candle in items:
-
-        if not isinstance(candle, dict):
-            continue
-
-        # Timestamp
-        try:
-
-            epoch = int(float(timestamp))
-
-        except Exception:
-
-            epoch = int(time.time())
-
-        try:
-
-            open_price = float(
-                candle.get(
-                    "open",
-                    candle.get(
-                        "Open",
-                        0
-                    )
-                )
-            )
-
-            high_price = float(
-                candle.get(
-                    "high",
-                    candle.get(
-                        "High",
-                        0
-                    )
-                )
-            )
-
-            low_price = float(
-                candle.get(
-                    "low",
-                    candle.get(
-                        "Low",
-                        0
-                    )
-                )
-            )
-
-            close_price = float(
-                candle.get(
-                    "close",
-                    candle.get(
-                        "Close",
-                        0
-                    )
-                )
-            )
-
-        except Exception:
-
-            continue
-
-        if open_price == 0 and close_price == 0:
-            continue
-
-        result.append(
-            {
-                "epoch": epoch,
-                "open": open_price,
-                "high": high_price,
-                "low": low_price,
-                "close": close_price,
-            }
-        )
-
-    result.sort(
-        key=lambda x: x["epoch"]
-    )
-
-    return result
-
-
-# =========================================================
-# GET REAL CANDLES
-# =========================================================
-
-async def get_real_candles(
-    symbol: str,
-    period: int = 60
-):
-
-    q = await get_client()
-
-    logger.info(
-        "Starting candle stream: %s | %s seconds",
-        symbol,
-        period
-    )
-
-    await q.start_candles_stream(
-        symbol,
-        period
-    )
-
-    # Give websocket a moment
-    await asyncio.sleep(2)
-
-    raw = await q.get_realtime_candles(
-        symbol,
-        period
-    )
-
-    candles = normalize_candles(
-        raw
-    )
-
-    logger.info(
-        "Received %s candles for %s",
-        len(candles),
-        symbol
-    )
-
-    return candles
+            raise
 
 
 # =========================================================
@@ -330,18 +196,17 @@ async def root():
         "data": "REAL",
         "timeframe": "M1",
         "pairs": len(PAIRS),
-        "source": "Unofficial PyQuotex WebSocket",
         "python": "3.12+",
         "debug": True
     }
 
 
 # =========================================================
-# CREDENTIAL STATUS
+# CONFIG STATUS
 # =========================================================
 
 @app.get("/api/v1/status")
-async def status():
+async def config_status():
 
     return {
         "status": "online",
@@ -349,22 +214,6 @@ async def status():
         "email_configured": bool(QUOTEX_EMAIL),
         "password_configured": bool(QUOTEX_PASSWORD),
         "client_created": client is not None
-    }
-
-
-# =========================================================
-# AVAILABLE PAIRS
-# =========================================================
-
-@app.get("/api/v1/pairs")
-async def available_pairs():
-
-    return {
-        "status": "success",
-        "market": "QUOTEX",
-        "data": "REAL",
-        "pairs": PAIRS,
-        "count": len(PAIRS)
     }
 
 
@@ -387,16 +236,20 @@ async def quotex_status():
             "data": "REAL",
             "connected": connected,
             "message": (
-                "Quotex connection is active"
+                "Quotex connection successful"
                 if connected
-                else "Quotex connection is not active"
+                else "Quotex connection not active"
             )
         }
 
     except Exception as e:
 
-        logger.exception(
+        logger.error(
             "Quotex status check failed"
+        )
+
+        logger.error(
+            traceback.format_exc()
         )
 
         return {
@@ -404,25 +257,168 @@ async def quotex_status():
             "market": "QUOTEX",
             "data": "REAL",
             "connected": False,
+            "error_type": type(e).__name__,
             "message": str(e)
         }
 
 
 # =========================================================
-# SINGLE PAIR CANDLES
+# PAIRS
+# =========================================================
+
+@app.get("/api/v1/pairs")
+async def pairs():
+
+    return {
+        "status": "success",
+        "market": "QUOTEX",
+        "data": "REAL",
+        "count": len(PAIRS),
+        "pairs": PAIRS
+    }
+
+
+# =========================================================
+# CANDLE NORMALIZER
+# =========================================================
+
+def normalize_candles(raw) -> List[dict]:
+
+    result = []
+
+    if not raw:
+        return result
+
+    if isinstance(raw, dict):
+
+        items = raw.items()
+
+    elif isinstance(raw, list):
+
+        items = enumerate(raw)
+
+    else:
+
+        return result
+
+    for timestamp, candle in items:
+
+        if not isinstance(candle, dict):
+            continue
+
+        try:
+
+            epoch = int(float(timestamp))
+
+        except Exception:
+
+            continue
+
+        try:
+
+            open_price = float(
+                candle.get(
+                    "open",
+                    candle.get("Open", 0)
+                )
+            )
+
+            high_price = float(
+                candle.get(
+                    "high",
+                    candle.get("High", 0)
+                )
+            )
+
+            low_price = float(
+                candle.get(
+                    "low",
+                    candle.get("Low", 0)
+                )
+            )
+
+            close_price = float(
+                candle.get(
+                    "close",
+                    candle.get("Close", 0)
+                )
+            )
+
+        except Exception:
+
+            continue
+
+        if open_price == 0 and close_price == 0:
+            continue
+
+        result.append({
+            "epoch": epoch,
+            "open": open_price,
+            "high": high_price,
+            "low": low_price,
+            "close": close_price
+        })
+
+    result.sort(
+        key=lambda x: x["epoch"]
+    )
+
+    return result
+
+
+# =========================================================
+# GET CANDLES
+# =========================================================
+
+async def get_real_candles(
+    symbol: str,
+    period: int
+):
+
+    q = await get_client()
+
+    logger.info(
+        "Starting candle stream: %s / %s seconds",
+        symbol,
+        period
+    )
+
+    await q.start_candles_stream(
+        symbol,
+        period
+    )
+
+    await asyncio.sleep(2)
+
+    raw = await q.get_realtime_candles(
+        symbol,
+        period
+    )
+
+    candles = normalize_candles(raw)
+
+    logger.info(
+        "Candles received: %s = %s",
+        symbol,
+        len(candles)
+    )
+
+    return candles
+
+
+# =========================================================
+# SINGLE CANDLE ENDPOINT
 # =========================================================
 
 @app.get("/api/v1/candles")
 async def candles(
 
     symbol: str = Query(
-        "EURUSD",
-        description="Quotex symbol"
+        "EURUSD"
     ),
 
     timeframe: str = Query(
-        "M1",
-        description="M1 or M5"
+        "M1"
     )
 
 ):
@@ -430,7 +426,6 @@ async def candles(
     symbol = symbol.strip().upper()
     timeframe = timeframe.strip().upper()
 
-    # Timeframe
     if timeframe == "M1":
 
         period = 60
@@ -443,16 +438,10 @@ async def candles(
 
         return {
             "status": "error",
-            "message": "Supported timeframes: M1, M5"
+            "message": "Only M1 and M5 are supported"
         }
 
     try:
-
-        logger.info(
-            "Candle request: %s | %s",
-            symbol,
-            timeframe
-        )
 
         candles_data = await get_real_candles(
             symbol,
@@ -482,8 +471,13 @@ async def candles(
 
     except Exception as e:
 
-        logger.exception(
-            "Candle request failed"
+        logger.error(
+            "Candle error: %s",
+            str(e)
+        )
+
+        logger.error(
+            traceback.format_exc()
         )
 
         return {
@@ -492,89 +486,9 @@ async def candles(
             "data": "REAL",
             "symbol": symbol,
             "timeframe": timeframe,
+            "error_type": type(e).__name__,
             "message": str(e)
         }
-
-
-# =========================================================
-# ALL PAIRS
-# =========================================================
-
-@app.get("/api/v1/all-candles")
-async def all_candles(
-
-    timeframe: str = Query(
-        "M1"
-    )
-
-):
-
-    timeframe = timeframe.strip().upper()
-
-    if timeframe == "M1":
-
-        period = 60
-
-    elif timeframe == "M5":
-
-        period = 300
-
-    else:
-
-        return {
-            "status": "error",
-            "message": "Supported timeframes: M1, M5"
-        }
-
-    output = {}
-
-    for symbol in PAIRS:
-
-        try:
-
-            logger.info(
-                "Loading pair: %s",
-                symbol
-            )
-
-            candles_data = await get_real_candles(
-                symbol,
-                period
-            )
-
-            if candles_data:
-
-                output[symbol] = {
-                    "status": "success",
-                    "candles": candles_data[-100:]
-                }
-
-            else:
-
-                output[symbol] = {
-                    "status": "error",
-                    "message": "No real candles"
-                }
-
-        except Exception as e:
-
-            logger.exception(
-                "Pair failed: %s",
-                symbol
-            )
-
-            output[symbol] = {
-                "status": "error",
-                "message": str(e)
-            }
-
-    return {
-        "status": "success",
-        "market": "QUOTEX",
-        "data": "REAL",
-        "timeframe": timeframe,
-        "pairs": output
-    }
 
 
 # =========================================================
@@ -592,11 +506,8 @@ async def shutdown():
 
             await client.close()
 
-        except Exception as e:
+        except Exception:
 
-            logger.warning(
-                "Error closing Quotex: %s",
-                str(e)
-            )
+            pass
 
         client = None
