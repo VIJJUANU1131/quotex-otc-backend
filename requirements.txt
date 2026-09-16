@@ -1,3 +1,5 @@
 fastapi
 uvicorn
+pyquotex
+curl_cffi
 websockets
