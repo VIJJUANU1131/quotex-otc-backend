@@ -1,19 +1,25 @@
 import os
 import asyncio
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from pyquotex.stable_api import Quotex
 
 
+# ==================================================
+# APP
+# ==================================================
+
 app = FastAPI(
     title="Quotex OTC Live Signal Backend",
     version="1.0.0"
 )
 
-# --------------------------------------------------
+
+# ==================================================
 # CORS
-# --------------------------------------------------
+# ==================================================
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,9 +30,9 @@ app.add_middleware(
 )
 
 
-# --------------------------------------------------
-# QUOTEX OTC PAIRS
-# --------------------------------------------------
+# ==================================================
+# OTC PAIRS
+# ==================================================
 
 OTC_PAIRS = [
     "AUDNZD_otc",
@@ -43,9 +49,28 @@ OTC_PAIRS = [
 ]
 
 
-# --------------------------------------------------
+# ==================================================
+# CREATE QUOTEX CLIENT
+# ==================================================
+
+def create_client():
+
+    email = os.getenv("QUOTEX_EMAIL")
+    password = os.getenv("QUOTEX_PASSWORD")
+
+    if not email or not password:
+        return None
+
+    return Quotex(
+        email=email,
+        password=password,
+        lang="en"
+    )
+
+
+# ==================================================
 # HOME
-# --------------------------------------------------
+# ==================================================
 
 @app.get("/")
 async def home():
@@ -54,15 +79,15 @@ async def home():
         "status": "online",
         "market": "QUOTEX_OTC",
         "timeframe": "M1",
-        "data": "REAL",
+        "data": "REAL_ONLY",
         "message": "Quotex OTC Live Market Backend",
         "pairs": OTC_PAIRS
     }
 
 
-# --------------------------------------------------
+# ==================================================
 # STATUS
-# --------------------------------------------------
+# ==================================================
 
 @app.get("/api/v1/status")
 async def status():
@@ -70,28 +95,45 @@ async def status():
     email = os.getenv("QUOTEX_EMAIL")
     password = os.getenv("QUOTEX_PASSWORD")
 
+    # ----------------------------------------------
+    # CHECK ENVIRONMENT
+    # ----------------------------------------------
+
     if not email or not password:
 
         return {
             "status": "error",
             "connection": "NOT_CONFIGURED",
             "market": "QUOTEX_OTC",
+            "timeframe": "M1",
             "error": "QUOTEX_CREDENTIALS_MISSING",
-            "message": "Add QUOTEX_EMAIL and QUOTEX_PASSWORD in Render Environment Variables"
+            "message": "QUOTEX_EMAIL or QUOTEX_PASSWORD is missing"
         }
+
 
     client = None
 
     try:
 
-        client = Quotex(
-    email=email,
-    password=password,
-    lang="en",
-    host="quotex.com"
-        )
+        client = create_client()
+
+        if client is None:
+
+            return {
+                "status": "error",
+                "connection": "NOT_CONFIGURED",
+                "market": "QUOTEX_OTC",
+                "timeframe": "M1",
+                "error": "QUOTEX_CREDENTIALS_MISSING"
+            }
+
+
+        # ------------------------------------------
+        # CONNECT
+        # ------------------------------------------
 
         connected, message = await client.connect()
+
 
         if connected:
 
@@ -100,26 +142,74 @@ async def status():
                 "connection": "CONNECTED",
                 "market": "QUOTEX_OTC",
                 "timeframe": "M1",
+                "data": "REAL",
                 "message": str(message)
             }
 
+
+        error_text = str(message)
+
+
+        if "403" in error_text:
+
+            return {
+                "status": "error",
+                "connection": "BLOCKED",
+                "market": "QUOTEX_OTC",
+                "timeframe": "M1",
+                "error": "QUOTEX_HTTP_403",
+                "message": "Quotex rejected the connection with HTTP 403",
+                "details": error_text
+            }
+
+
         return {
             "status": "error",
             "connection": "FAILED",
             "market": "QUOTEX_OTC",
+            "timeframe": "M1",
             "error": "QUOTEX_CONNECTION_FAILED",
-            "message": str(message)
+            "message": error_text
         }
+
 
     except Exception as e:
 
+        error_text = str(e)
+
+
+        # ------------------------------------------
+        # 403 / RESPONSE ERROR
+        # ------------------------------------------
+
+        if (
+            "403" in error_text
+            or "reason_phrase" in error_text
+        ):
+
+            return {
+                "status": "error",
+                "connection": "BLOCKED",
+                "market": "QUOTEX_OTC",
+                "timeframe": "M1",
+                "error": "QUOTEX_ACCESS_BLOCKED",
+                "message": (
+                    "Quotex connection was rejected. "
+                    "Real OTC data is not available from this connection."
+                ),
+                "details": error_text
+            }
+
+
         return {
             "status": "error",
             "connection": "FAILED",
             "market": "QUOTEX_OTC",
+            "timeframe": "M1",
             "error": "QUOTEX_CONNECTION_ERROR",
-            "message": str(e)
+            "message": error_text
         }
+
 
     finally:
 
@@ -131,9 +221,9 @@ async def status():
                 pass
 
 
-# --------------------------------------------------
+# ==================================================
 # REAL OTC M1 CANDLES
-# --------------------------------------------------
+# ==================================================
 
 @app.get("/api/v1/candles")
 async def candles(
@@ -141,7 +231,7 @@ async def candles(
 ):
 
     # ----------------------------------------------
-    # CHECK PAIR
+    # CHECK SYMBOL
     # ----------------------------------------------
 
     if symbol not in OTC_PAIRS:
@@ -152,13 +242,13 @@ async def candles(
             "symbol": symbol,
             "timeframe": "M1",
             "error": "UNSUPPORTED_OTC_PAIR",
-            "message": "This OTC pair is not enabled",
+            "message": "Unsupported OTC pair",
             "candles": []
         }
 
 
     # ----------------------------------------------
-    # GET LOGIN
+    # CHECK LOGIN
     # ----------------------------------------------
 
     email = os.getenv("QUOTEX_EMAIL")
@@ -172,7 +262,7 @@ async def candles(
             "symbol": symbol,
             "timeframe": "M1",
             "error": "QUOTEX_CREDENTIALS_MISSING",
-            "message": "QUOTEX_EMAIL / QUOTEX_PASSWORD missing",
+            "message": "Quotex credentials are missing",
             "candles": []
         }
 
@@ -182,16 +272,10 @@ async def candles(
     try:
 
         # ------------------------------------------
-        # CREATE CLIENT
+        # CLIENT
         # ------------------------------------------
 
-        client = Quotex(
-            email=email,
-            password=password,
-            lang="en",
-            asset_default=symbol,
-            period_default=60
-        )
+        client = create_client()
 
 
         # ------------------------------------------
@@ -200,7 +284,26 @@ async def candles(
 
         connected, message = await client.connect()
 
+
         if not connected:
+
+            error_text = str(message)
+
+
+            if "403" in error_text:
+
+                return {
+                    "status": "error",
+                    "market": "QUOTEX_OTC",
+                    "symbol": symbol,
+                    "timeframe": "M1",
+                    "connection": "BLOCKED",
+                    "error": "QUOTEX_HTTP_403",
+                    "message": "Quotex returned HTTP 403",
+                    "details": error_text,
+                    "candles": []
+                }
+
 
             return {
                 "status": "error",
@@ -209,23 +312,44 @@ async def candles(
                 "timeframe": "M1",
                 "connection": "FAILED",
                 "error": "QUOTEX_CONNECTION_FAILED",
-                "message": str(message),
+                "message": error_text,
                 "candles": []
             }
 
 
         # ------------------------------------------
-        # START M1 CANDLE STREAM
+        # START M1 STREAM
         # ------------------------------------------
 
-        await client.start_candles_one_stream(
-            symbol,
-            60
-        )
+        try:
+
+            result = client.start_candles_one_stream(
+                symbol,
+                60
+            )
+
+            # Support both sync and async versions
+            if asyncio.iscoroutine(result):
+                await result
+
+        except Exception as e:
+
+            error_text = str(e)
+
+            return {
+                "status": "error",
+                "market": "QUOTEX_OTC",
+                "symbol": symbol,
+                "timeframe": "M1",
+                "connection": "CONNECTED",
+                "error": "CANDLE_STREAM_ERROR",
+                "message": error_text,
+                "candles": []
+            }
 
 
         # ------------------------------------------
-        # WAIT FOR DATA
+        # WAIT FOR REAL DATA
         # ------------------------------------------
 
         await asyncio.sleep(3)
@@ -235,10 +359,14 @@ async def candles(
         # GET REALTIME CANDLES
         # ------------------------------------------
 
-        data = await client.get_realtime_candles(
+        data = client.get_realtime_candles(
             symbol,
             60
         )
+
+        # Support async/sync versions
+        if asyncio.iscoroutine(data):
+            data = await data
 
 
         if not data:
@@ -250,7 +378,7 @@ async def candles(
                 "timeframe": "M1",
                 "connection": "CONNECTED",
                 "error": "NO_CANDLE_DATA",
-                "message": "Quotex connected but no realtime OTC candle data was received",
+                "message": "No real OTC M1 candle data received",
                 "candles": []
             }
 
@@ -264,34 +392,22 @@ async def candles(
 
         if isinstance(data, dict):
 
-            items = []
-
-            for key, value in data.items():
-
-                if isinstance(value, dict):
-
-                    candle = dict(value)
-
-                    if candle.get("time") is None:
-
-                        candle["time"] = key
-
-                    items.append(candle)
+            values = list(data.values())
 
         elif isinstance(data, list):
 
-            items = data
+            values = data
 
         else:
 
-            items = []
+            values = []
 
 
         # ------------------------------------------
-        # CONVERT CANDLE FIELDS
+        # PROCESS CANDLES
         # ------------------------------------------
 
-        for candle in items:
+        for candle in values:
 
             if not isinstance(candle, dict):
                 continue
@@ -312,15 +428,15 @@ async def candles(
 
             high_price = (
                 candle.get("high")
-                or candle.get("max")
                 or candle.get("high_price")
+                or candle.get("max")
             )
 
 
             low_price = (
                 candle.get("low")
-                or candle.get("min")
                 or candle.get("low_price")
+                or candle.get("min")
             )
 
 
@@ -336,15 +452,29 @@ async def candles(
 
             try:
 
-                normalized = {
+                item = {
                     "time": candle_time,
-                    "open": float(open_price) if open_price is not None else None,
-                    "high": float(high_price) if high_price is not None else None,
-                    "low": float(low_price) if low_price is not None else None,
+                    "open": (
+                        float(open_price)
+                        if open_price is not None
+                        else None
+                    ),
+                    "high": (
+                        float(high_price)
+                        if high_price is not None
+                        else None
+                    ),
+                    "low": (
+                        float(low_price)
+                        if low_price is not None
+                        else None
+                    ),
                     "close": float(close_price)
                 }
 
-                candles_list.append(normalized)
+
+                candles_list.append(item)
+
 
             except Exception:
 
@@ -352,10 +482,10 @@ async def candles(
 
 
         # ------------------------------------------
-        # SORT BY TIME
+        # SORT
         # ------------------------------------------
 
-        def candle_sort(item):
+        def get_time(item):
 
             value = item.get("time")
 
@@ -366,19 +496,19 @@ async def candles(
 
 
         candles_list.sort(
-            key=candle_sort
+            key=get_time
         )
 
 
         # ------------------------------------------
-        # KEEP LAST 100
+        # LAST 100
         # ------------------------------------------
 
         candles_list = candles_list[-100:]
 
 
         # ------------------------------------------
-        # LATEST PRICE
+        # PRICE
         # ------------------------------------------
 
         latest_price = None
@@ -411,21 +541,24 @@ async def candles(
 
 
         # ------------------------------------------
-        # SPECIAL 403 MESSAGE
+        # ACCESS / RESPONSE ERROR
         # ------------------------------------------
 
-        if "403" in error_text:
+        if (
+            "403" in error_text
+            or "reason_phrase" in error_text
+        ):
 
             return {
                 "status": "error",
                 "market": "QUOTEX_OTC",
                 "symbol": symbol,
                 "timeframe": "M1",
-                "error": "QUOTEX_HTTP_403",
+                "connection": "BLOCKED",
+                "error": "QUOTEX_ACCESS_BLOCKED",
                 "message": (
-                    "Quotex connection returned HTTP 403. "
-                    "This is an access/connection restriction, "
-                    "not a candle-analysis error."
+                    "Quotex rejected the connection. "
+                    "No real OTC candle was generated."
                 ),
                 "details": error_text,
                 "candles": []
@@ -441,6 +574,7 @@ async def candles(
             "market": "QUOTEX_OTC",
             "symbol": symbol,
             "timeframe": "M1",
+            "connection": "FAILED",
             "error": "OTC_DATA_ERROR",
             "message": error_text,
             "candles": []
@@ -457,18 +591,20 @@ async def candles(
 
             try:
 
-                await client.stop_candles_one_stream(
+                result = client.stop_candles_one_stream(
                     symbol,
                     60
                 )
 
-            except Exception:
+                if asyncio.iscoroutine(result):
+                    await result
 
+            except Exception:
                 pass
 
 
             # --------------------------------------
-            # CLOSE CONNECTION
+            # CLOSE
             # --------------------------------------
 
             try:
@@ -476,5 +612,4 @@ async def candles(
                 await client.close()
 
             except Exception:
-
                 pass
