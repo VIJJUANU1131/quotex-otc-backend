@@ -1,10 +1,10 @@
+import os
+import time
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import os
-import requests
-from datetime import datetime, timezone
+from pyquotex.stable_api import Quotex
 
-app = FastAPI(title="Live Forex Signal Backend")
+app = FastAPI(title="Quotex OTC Live Market Data")
 
 app.add_middleware(
     CORSMiddleware,
@@ -14,242 +14,196 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-API_KEY = os.getenv("ALPHAVANTAGE_API_KEY")
-
-# Normal Forex pairs
-PAIRS = {
-    "EURUSD": ("EUR", "USD"),
-    "GBPUSD": ("GBP", "USD"),
-    "USDJPY": ("USD", "JPY"),
-    "AUDUSD": ("AUD", "USD"),
-    "USDCAD": ("USD", "CAD"),
-    "EURJPY": ("EUR", "JPY"),
-    "GBPJPY": ("GBP", "JPY"),
-}
+OTC_PAIRS = [
+    "AUDNZD_otc",
+    "GBPNZD_otc",
+    "NZDCAD_otc",
+    "NZDUSD_otc",
+    "USDBRL_otc",
+    "USDDZD_otc",
+    "USDEGP_otc",
+    "USDNGN_otc",
+    "USDCOP_otc",
+    "USDBDT_otc",
+    "USDPHP_otc",
+]
 
 
 @app.get("/")
 def home():
     return {
         "status": "online",
-        "message": "Live Forex Signal Backend Running",
-        "market": "FOREX",
+        "market": "QUOTEX_OTC",
         "timeframe": "M1",
-        "api_configured": bool(API_KEY),
-        "pairs": list(PAIRS.keys())
+        "message": "Quotex OTC Live Market Data Backend",
+        "pairs": OTC_PAIRS
     }
 
 
 @app.get("/api/v1/status")
-def status():
-    return {
-        "status": "online",
-        "market": "FOREX",
-        "timeframe": "M1",
-        "api_configured": bool(API_KEY),
-        "pairs": list(PAIRS.keys())
-    }
+async def status():
 
+    email = os.getenv("QUOTEX_EMAIL")
+    password = os.getenv("QUOTEX_PASSWORD")
 
-def get_signal(closes):
-    if len(closes) < 6:
-        return "WAIT", 0
+    if not email or not password:
+        return {
+            "status": "error",
+            "connection": "NOT_CONFIGURED",
+            "message": "QUOTEX_EMAIL / QUOTEX_PASSWORD missing"
+        }
 
-    recent = closes[-6:]
+    client = Quotex(
+        email=email,
+        password=password,
+        lang="en"
+    )
 
-    up = 0
-    down = 0
+    try:
+        connected, message = await client.connect()
 
-    for i in range(1, len(recent)):
-        if recent[i] > recent[i - 1]:
-            up += 1
-        elif recent[i] < recent[i - 1]:
-            down += 1
+        return {
+            "status": "online" if connected else "error",
+            "connection": "CONNECTED" if connected else "FAILED",
+            "market": "QUOTEX_OTC",
+            "message": str(message)
+        }
 
-    if up >= 4 and up > down:
-        strength = min(95, 60 + up * 7)
-        return "BUY", strength
+    except Exception as e:
+        return {
+            "status": "error",
+            "connection": "FAILED",
+            "error": str(e)
+        }
 
-    if down >= 4 and down > up:
-        strength = min(95, 60 + down * 7)
-        return "SELL", strength
-
-    return "WAIT", 0
+    finally:
+        try:
+            await client.close()
+        except:
+            pass
 
 
 @app.get("/api/v1/candles")
-def candles(symbol: str = "EURUSD"):
+async def candles(symbol: str = "EURUSD_otc"):
 
-    if not API_KEY:
+    if symbol not in OTC_PAIRS:
         return {
             "status": "error",
-            "market": "FOREX",
+            "market": "QUOTEX_OTC",
             "symbol": symbol,
             "timeframe": "M1",
-            "signal": "WAIT",
-            "strength": 0,
-            "price": None,
-            "error": "API_KEY_NOT_CONFIGURED"
+            "error": "UNSUPPORTED_OTC_PAIR",
+            "candles": []
         }
 
-    if symbol not in PAIRS:
+    email = os.getenv("QUOTEX_EMAIL")
+    password = os.getenv("QUOTEX_PASSWORD")
+
+    if not email or not password:
         return {
             "status": "error",
-            "market": "FOREX",
-            "symbol": symbol,
-            "timeframe": "M1",
-            "signal": "WAIT",
-            "strength": 0,
-            "price": None,
-            "error": "UNSUPPORTED_SYMBOL",
-            "available_pairs": list(PAIRS.keys())
+            "error": "QUOTEX_CREDENTIALS_MISSING",
+            "candles": []
         }
 
-    from_currency, to_currency = PAIRS[symbol]
-
-    url = "https://www.alphavantage.co/query"
-
-    params = {
-        "function": "FX_INTRADAY",
-        "from_symbol": from_currency,
-        "to_symbol": to_currency,
-        "interval": "1min",
-        "outputsize": "compact",
-        "apikey": API_KEY
-    }
+    client = Quotex(
+        email=email,
+        password=password,
+        lang="en"
+    )
 
     try:
-        response = requests.get(
-            url,
-            params=params,
-            timeout=20
-        )
 
-        response.raise_for_status()
+        connected, message = await client.connect()
 
-        data = response.json()
-
-        # Alpha Vantage errors
-        if "Error Message" in data:
+        if not connected:
             return {
                 "status": "error",
-                "market": "FOREX",
+                "market": "QUOTEX_OTC",
                 "symbol": symbol,
                 "timeframe": "M1",
-                "signal": "WAIT",
-                "strength": 0,
-                "price": None,
-                "error": "ALPHAVANTAGE_ERROR",
-                "message": data["Error Message"]
+                "connection": "FAILED",
+                "error": "QUOTEX_CONNECTION_FAILED",
+                "message": str(message),
+                "candles": []
             }
 
-        if "Note" in data:
+        # 1-minute realtime candle stream
+        client.start_candles_stream(symbol, 60)
+
+        # Give websocket a moment to receive data
+        await __import__("asyncio").sleep(2)
+
+        data = await client.get_realtime_candles(symbol, 60)
+
+        if not data:
             return {
                 "status": "error",
-                "market": "FOREX",
+                "market": "QUOTEX_OTC",
                 "symbol": symbol,
                 "timeframe": "M1",
-                "signal": "WAIT",
-                "strength": 0,
-                "price": None,
-                "error": "API_LIMIT",
-                "message": data["Note"]
-            }
-
-        time_series = None
-
-        for key in data.keys():
-            if key.startswith("Time Series FX"):
-                time_series = data[key]
-                break
-
-        if not time_series:
-            return {
-                "status": "error",
-                "market": "FOREX",
-                "symbol": symbol,
-                "timeframe": "M1",
-                "signal": "WAIT",
-                "strength": 0,
-                "price": None,
+                "connection": "CONNECTED",
                 "error": "NO_CANDLE_DATA",
-                "message": "No 1-minute candle data returned"
+                "message": "Connected to Quotex but no OTC candle data received",
+                "candles": []
             }
 
-        sorted_times = sorted(
-            time_series.keys()
-        )
+        candles_list = []
 
-        recent_times = sorted_times[-10:]
+        if isinstance(data, dict):
+            values = list(data.values())
+        else:
+            values = data
 
-        closes = []
+        for candle in values:
 
-        for t in recent_times:
-            candle = time_series[t]
+            if not isinstance(candle, dict):
+                continue
 
-            close_value = (
-                candle.get("4. close")
-                or candle.get("close")
-            )
-
-            if close_value is not None:
-                closes.append(float(close_value))
-
-        if len(closes) < 6:
-            return {
-                "status": "error",
-                "market": "FOREX",
-                "symbol": symbol,
-                "timeframe": "M1",
-                "signal": "WAIT",
-                "strength": 0,
-                "price": closes[-1] if closes else None,
-                "error": "NOT_ENOUGH_CANDLES"
+            item = {
+                "time": candle.get("time"),
+                "open": candle.get("open"),
+                "high": candle.get("high"),
+                "low": candle.get("low"),
+                "close": candle.get("close")
             }
 
-        price = closes[-1]
+            if item["close"] is not None:
+                candles_list.append(item)
 
-        signal, strength = get_signal(closes)
+        candles_list = candles_list[-100:]
 
-        return {
-            "status": "online",
-            "market": "FOREX",
-            "symbol": symbol,
-            "timeframe": "M1",
-            "signal": signal,
-            "strength": strength,
-            "price": price,
-            "candleTime": recent_times[-1],
-            "source": "Alpha Vantage",
-            "serverTime": datetime.now(
-                timezone.utc
-            ).isoformat()
-        }
+        latest_price = None
 
-    except requests.RequestException as e:
+        if candles_list:
+            latest_price = candles_list[-1]["close"]
 
         return {
-            "status": "error",
-            "market": "FOREX",
+            "status": "success",
+            "market": "QUOTEX_OTC",
             "symbol": symbol,
             "timeframe": "M1",
-            "signal": "WAIT",
-            "strength": 0,
-            "price": None,
-            "error": "API_REQUEST_FAILED",
-            "message": str(e)
+            "connection": "CONNECTED",
+            "price": latest_price,
+            "count": len(candles_list),
+            "candles": candles_list
         }
 
     except Exception as e:
 
         return {
             "status": "error",
-            "market": "FOREX",
+            "market": "QUOTEX_OTC",
             "symbol": symbol,
             "timeframe": "M1",
-            "signal": "WAIT",
-            "strength": 0,
-            "price": None,
-            "error": "SERVER_ERROR",
-            "message": str(e)
+            "error": "OTC_DATA_ERROR",
+            "message": str(e),
+            "candles": []
         }
+
+    finally:
+
+        try:
+            await client.close()
+        except:
+            pass
