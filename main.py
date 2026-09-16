@@ -511,3 +511,15 @@ async def shutdown():
             pass
 
         client = None
+
+@app.get("/api/v1/debug-versions")
+async def debug_versions():
+    import sys
+    import curl_cffi
+    import pyquotex
+
+    return {
+        "python": sys.version,
+        "curl_cffi": getattr(curl_cffi, "__version__", "unknown"),
+        "pyquotex": getattr(pyquotex, "__version__", "unknown")
+    }
