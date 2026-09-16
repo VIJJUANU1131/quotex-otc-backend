@@ -85,9 +85,10 @@ async def status():
     try:
 
         client = Quotex(
-            email=email,
-            password=password,
-            lang="en"
+    email=email,
+    password=password,
+    lang="en",
+    host="quotex.com"
         )
 
         connected, message = await client.connect()
