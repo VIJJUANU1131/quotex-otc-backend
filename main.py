@@ -1,13 +1,14 @@
 import os
+import sys
+import time
+import importlib.metadata
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pyquotex.stable_api import Quotex
 
 
-app = FastAPI(
-    title="Quotex OTC Backend",
-    version="1.0.0"
-)
+app = FastAPI(title="Quotex OTC Live Market Data")
 
 
 app.add_middleware(
@@ -34,142 +35,149 @@ OTC_PAIRS = [
 ]
 
 
-def make_client():
+# --------------------------------------------------
+# HOME
+# --------------------------------------------------
+
+@app.get("/")
+def home():
+    return {
+        "status": "online",
+        "market": "QUOTEX_OTC",
+        "timeframe": "M1",
+        "message": "Quotex OTC Live Market Data Backend",
+        "pairs": OTC_PAIRS
+    }
+
+
+# --------------------------------------------------
+# DIAGNOSTICS
+# --------------------------------------------------
+
+@app.get("/api/v1/diagnostics")
+async def diagnostics():
+
+    def get_version(package_name):
+        try:
+            return importlib.metadata.version(package_name)
+        except Exception:
+            return "not-installed"
+
+    return {
+        "status": "diagnostic",
+        "python_version": sys.version,
+        "python_major": sys.version_info.major,
+        "python_minor": sys.version_info.minor,
+
+        "pyquotex_version": get_version("pyquotex"),
+        "curl_cffi_version": get_version("curl_cffi"),
+        "httpx_version": get_version("httpx"),
+        "fastapi_version": get_version("fastapi"),
+        "uvicorn_version": get_version("uvicorn"),
+
+        "quotex_email_configured": bool(os.getenv("QUOTEX_EMAIL")),
+        "quotex_password_configured": bool(os.getenv("QUOTEX_PASSWORD")),
+
+        "market": "QUOTEX_OTC",
+        "timeframe": "M1"
+    }
+
+
+# --------------------------------------------------
+# CREATE QUOTEX CLIENT
+# --------------------------------------------------
+
+def create_client():
 
     email = os.getenv("QUOTEX_EMAIL")
     password = os.getenv("QUOTEX_PASSWORD")
 
     if not email or not password:
-        return None
+        raise RuntimeError(
+            "QUOTEX_EMAIL / QUOTEX_PASSWORD missing"
+        )
 
     client = Quotex(
         email=email,
         password=password,
-        lang="en",
-        host="qxbroker.com",
-        asset_default="AUDNZD_otc",
-        period_default=60
+        lang="en"
     )
 
     return client
 
 
-@app.get("/")
-async def home():
-
-    return {
-        "status": "online",
-        "market": "QUOTEX_OTC",
-        "timeframe": "M1",
-        "data": "REAL_ONLY",
-        "pairs": OTC_PAIRS
-    }
-
+# --------------------------------------------------
+# STATUS
+# --------------------------------------------------
 
 @app.get("/api/v1/status")
 async def status():
 
-    email = os.getenv("QUOTEX_EMAIL")
-    password = os.getenv("QUOTEX_PASSWORD")
-
-    if not email or not password:
-
-        return {
-            "status": "error",
-            "connection": "NOT_CONFIGURED",
-            "market": "QUOTEX_OTC",
-            "error": "QUOTEX_CREDENTIALS_MISSING"
-        }
-
-    client = None
-
     try:
 
-        client = make_client()
+        email = os.getenv("QUOTEX_EMAIL")
+        password = os.getenv("QUOTEX_PASSWORD")
 
-        if client is None:
-
+        if not email or not password:
             return {
                 "status": "error",
-                "connection": "NOT_CONFIGURED",
                 "market": "QUOTEX_OTC",
+                "timeframe": "M1",
+                "connection": "NOT_CONFIGURED",
                 "error": "QUOTEX_CREDENTIALS_MISSING"
             }
 
-        # Enable debug information in Render logs
-        client.debug_ws_enable = True
+        client = create_client()
 
-        connected, message = await client.connect()
+        try:
 
-        if connected:
+            if hasattr(client, "debug_ws_enable"):
+                client.debug_ws_enable = True
+
+            connected, message = await client.connect()
 
             return {
-                "status": "online",
-                "connection": "CONNECTED",
+                "status": "online" if connected else "error",
                 "market": "QUOTEX_OTC",
                 "timeframe": "M1",
+                "connection": "CONNECTED" if connected else "FAILED",
                 "message": str(message)
             }
 
-        return {
-            "status": "error",
-            "connection": "FAILED",
-            "market": "QUOTEX_OTC",
-            "timeframe": "M1",
-            "error": "QUOTEX_CONNECTION_FAILED",
-            "message": str(message)
-        }
-
-    except Exception as e:
-
-        error_text = repr(e)
-
-        return {
-            "status": "error",
-            "connection": "FAILED",
-            "market": "QUOTEX_OTC",
-            "timeframe": "M1",
-            "error": "QUOTEX_CONNECTION_EXCEPTION",
-            "message": error_text
-        }
-
-    finally:
-
-        if client:
+        finally:
 
             try:
                 await client.close()
             except Exception:
                 pass
 
-
-@app.get("/api/v1/candles")
-async def candles(
-    symbol: str = "AUDNZD_otc"
-):
-
-    if symbol not in OTC_PAIRS:
+    except Exception as e:
 
         return {
             "status": "error",
             "market": "QUOTEX_OTC",
-            "symbol": symbol,
             "timeframe": "M1",
-            "error": "UNSUPPORTED_OTC_PAIR",
-            "candles": []
+            "connection": "FAILED",
+            "error": type(e).__name__,
+            "message": repr(e)
         }
 
-    email = os.getenv("QUOTEX_EMAIL")
-    password = os.getenv("QUOTEX_PASSWORD")
 
-    if not email or not password:
+# --------------------------------------------------
+# OTC CANDLES
+# --------------------------------------------------
 
+@app.get("/api/v1/candles")
+async def candles(symbol: str = "AUDNZD_otc"):
+
+    if symbol not in OTC_PAIRS:
         return {
             "status": "error",
             "market": "QUOTEX_OTC",
             "symbol": symbol,
             "timeframe": "M1",
-            "error": "QUOTEX_CREDENTIALS_MISSING",
+            "error": "INVALID_OTC_SYMBOL",
+            "message": "Symbol is not in the configured OTC pair list",
             "candles": []
         }
 
@@ -177,106 +185,75 @@ async def candles(
 
     try:
 
-        client = Quotex(
-            email=email,
-            password=password,
-            lang="en",
-            host="qxbroker.com",
-            asset_default=symbol,
-            period_default=60
-        )
+        client = create_client()
 
-        client.debug_ws_enable = True
+        if hasattr(client, "debug_ws_enable"):
+            client.debug_ws_enable = True
 
         connected, message = await client.connect()
 
         if not connected:
-
             return {
                 "status": "error",
                 "market": "QUOTEX_OTC",
                 "symbol": symbol,
                 "timeframe": "M1",
                 "connection": "FAILED",
-                "error": "QUOTEX_CONNECTION_FAILED",
+                "error": "OTC_CONNECTION_FAILED",
                 "message": str(message),
                 "candles": []
             }
 
-        # IMPORTANT:
-        # This method is async in the current PyQuotex API.
+        # Start 1-minute realtime candle stream
         await client.start_candles_one_stream(
             symbol,
             60
         )
 
-        # Wait for realtime candle data
-        import asyncio
-        await asyncio.sleep(3)
+        # Give the stream a moment to receive data
+        await asyncio_sleep(3)
 
-        data = await client.get_realtime_candles(
+        realtime = await client.get_realtime_candles(
             symbol,
             60
         )
 
-        if not data:
-
+        if not realtime:
             return {
                 "status": "error",
                 "market": "QUOTEX_OTC",
                 "symbol": symbol,
                 "timeframe": "M1",
                 "connection": "CONNECTED",
-                "error": "NO_CANDLE_DATA",
-                "message": "Connected but no real OTC candle data received",
+                "error": "NO_REALTIME_CANDLES",
+                "message": "Connected but no realtime OTC candles were returned",
                 "candles": []
             }
 
-        if isinstance(data, dict):
+        candles_list = []
 
-            values = list(data.values())
+        if isinstance(realtime, dict):
 
-        elif isinstance(data, list):
+            items = realtime.items()
 
-            values = data
+            for timestamp, candle in items:
 
-        else:
+                if isinstance(candle, dict):
 
-            values = []
+                    candles_list.append({
+                        "time": timestamp,
+                        "open": candle.get("open"),
+                        "high": candle.get("high"),
+                        "low": candle.get("low"),
+                        "close": candle.get("close"),
+                        "volume": candle.get("volume", 0)
+                    })
 
-        result = []
-
-        for candle in values:
-
-            if not isinstance(candle, dict):
-                continue
-
-            try:
-
-                item = {
-                    "time": (
-                        candle.get("time")
-                        or candle.get("timestamp")
-                        or candle.get("from")
-                    ),
-                    "open": float(candle["open"]),
-                    "high": float(candle["high"]),
-                    "low": float(candle["low"]),
-                    "close": float(candle["close"])
-                }
-
-                result.append(item)
-
-            except Exception:
-
-                continue
-
-        result = result[-100:]
-
-        price = None
-
-        if result:
-            price = result[-1]["close"]
+        candles_list.sort(
+            key=lambda x: float(x["time"])
+            if str(x["time"]).replace(".", "", 1).isdigit()
+            else 0
+        )
 
         return {
             "status": "success",
@@ -284,10 +261,8 @@ async def candles(
             "symbol": symbol,
             "timeframe": "M1",
             "connection": "CONNECTED",
-            "data": "REAL",
-            "price": price,
-            "count": len(result),
-            "candles": result
+            "count": len(candles_list),
+            "candles": candles_list
         }
 
     except Exception as e:
@@ -305,9 +280,18 @@ async def candles(
 
     finally:
 
-        if client:
+        if client is not None:
 
             try:
                 await client.close()
             except Exception:
                 pass
+
+
+# --------------------------------------------------
+# SMALL ASYNC SLEEP HELPER
+# --------------------------------------------------
+
+async def asyncio_sleep(seconds):
+    import asyncio
+    await asyncio.sleep(seconds)
